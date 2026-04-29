@@ -35,7 +35,7 @@ export function Footer() {
             <li><a href="https://www.threads.com/@padawan.joy" target="_blank" rel="noreferrer">Threads</a></li>
             <li><a href="https://x.com/padawanjoy" target="_blank" rel="noreferrer">X</a></li>
             <li><a href="/rss.xml">RSS</a></li>
-            <li><a href="#newsletter">Newsletter</a></li>
+            <li><Link href="/#newsletter">Newsletter</Link></li>
           </ul>
         </div>
       </div>
