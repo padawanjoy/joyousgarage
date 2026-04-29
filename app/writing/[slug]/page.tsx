@@ -73,6 +73,11 @@ export default async function PostPage({ params }: PageProps) {
       "@type": "Person",
       name: SITE.author.name,
       url: SITE.url + "/about",
+      sameAs: [
+        SITE.author.github,
+        SITE.author.threads,
+        SITE.author.x,
+      ],
     },
     publisher: {
       "@type": "Organization",

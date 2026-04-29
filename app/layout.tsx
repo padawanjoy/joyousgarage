@@ -104,7 +104,12 @@ export default function RootLayout({
               author: {
                 "@type": "Person",
                 name: SITE.author.name,
-                url: SITE.author.github,
+                url: `${SITE.url}/about`,
+                sameAs: [
+                  SITE.author.github,
+                  SITE.author.threads,
+                  SITE.author.x,
+                ],
               },
               potentialAction: {
                 "@type": "SearchAction",

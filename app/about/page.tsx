@@ -100,6 +100,26 @@ export default function AboutPage() {
               </a>
             </li>
             <li>
+              Threads ·{" "}
+              <a
+                href="https://www.threads.com/@padawan.joy"
+                target="_blank"
+                rel="noreferrer"
+              >
+                @padawan.joy
+              </a>
+            </li>
+            <li>
+              X ·{" "}
+              <a
+                href="https://x.com/padawanjoy"
+                target="_blank"
+                rel="noreferrer"
+              >
+                @padawanjoy
+              </a>
+            </li>
+            <li>
               Newsletter ·{" "}
               <Link href="/#newsletter">Builder&apos;s letter</Link>
             </li>

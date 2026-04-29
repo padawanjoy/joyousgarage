@@ -32,9 +32,10 @@ export function Footer() {
           <h5>Elsewhere</h5>
           <ul>
             <li><a href="https://github.com/padawanjoy" target="_blank" rel="noreferrer">GitHub</a></li>
+            <li><a href="https://www.threads.com/@padawan.joy" target="_blank" rel="noreferrer">Threads</a></li>
+            <li><a href="https://x.com/padawanjoy" target="_blank" rel="noreferrer">X</a></li>
             <li><a href="/rss.xml">RSS</a></li>
             <li><a href="#newsletter">Newsletter</a></li>
-            <li><a href="#" target="_blank" rel="noreferrer">X / Twitter</a></li>
           </ul>
         </div>
       </div>
