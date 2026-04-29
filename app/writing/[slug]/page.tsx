@@ -14,6 +14,7 @@ import {
 } from "@/lib/posts";
 import { SITE } from "@/lib/site-config";
 import { ShareButtons } from "@/components/share-buttons";
+import { AdSlot } from "@/components/ad-slot";
 
 interface PageProps {
   params: Promise<{ slug: string }>;
@@ -120,6 +121,8 @@ export default async function PostPage({ params }: PageProps) {
               ))}
             </footer>
           )}
+
+          <AdSlot slot="9118372920" />
 
           <ShareButtons
             url={`${SITE.url}/writing/${post.slug}`}

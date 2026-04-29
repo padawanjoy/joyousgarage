@@ -886,6 +886,12 @@ footer a:hover { color: var(--ink-strong); }
 }
 .post-back a:hover { color: var(--ink-strong); }
 
+/* ─────────── AD SLOT ─────────── */
+.ad-slot {
+  margin: var(--s-8) 0 var(--s-7);
+  min-height: 100px;
+}
+
 /* ─────────── SHARE BUTTONS ─────────── */
 .share-buttons {
   margin-top: var(--s-7);
