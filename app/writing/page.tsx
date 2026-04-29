@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { Header } from "@/components/header";
 import { Footer } from "@/components/footer";
 import { PostCard } from "@/components/post-card";
@@ -9,8 +10,15 @@ export const metadata: Metadata = {
   description: "코드, 도구, 그 사이의 노트.",
 };
 
-export default function WritingIndex() {
-  const posts = getAllPosts();
+interface Props {
+  searchParams: Promise<{ tag?: string }>;
+}
+
+export default async function WritingIndex({ searchParams }: Props) {
+  const { tag } = await searchParams;
+  const all = getAllPosts();
+  const posts = tag ? all.filter((p) => p.tags?.includes(tag)) : all;
+
   const grouped = new Map<number, typeof posts>();
   for (const post of posts) {
     const year = new Date(post.date).getFullYear();
@@ -28,12 +36,27 @@ export default function WritingIndex() {
           <h1 className="section-title">
             Recent <em>writing</em>.
           </h1>
-          <p className="page-lead">코드, 도구, 그 사이의 노트.</p>
-          <p className="page-meta">{posts.length} posts · since 2026</p>
+          {tag ? (
+            <p className="page-lead writing-filter">
+              <span>Filtered by</span>{" "}
+              <span className="writing-filter-tag">#{tag}</span>
+              <Link href="/writing" className="writing-filter-clear" aria-label="필터 지우기">
+                ×
+              </Link>
+            </p>
+          ) : (
+            <p className="page-lead">코드, 도구, 그 사이의 노트.</p>
+          )}
+          <p className="page-meta">
+            {posts.length} {tag ? `match${posts.length === 1 ? "" : "es"}` : "posts"}
+            {!tag && all.length > 0 && ` · since ${new Date(all[all.length - 1].date).getFullYear()}`}
+          </p>
         </header>
 
         {posts.length === 0 ? (
-          <p className="writing-empty">아직 발행된 글이 없습니다.</p>
+          <p className="writing-empty">
+            {tag ? `#${tag} 태그가 붙은 글이 아직 없습니다.` : "아직 발행된 글이 없습니다."}
+          </p>
         ) : (
           years.map((year) => (
             <section key={year} className="writing-year">

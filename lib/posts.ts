@@ -14,6 +14,8 @@ export interface PostFrontmatter {
   description: string;
   tags?: string[];
   draft?: boolean;
+  series?: string;        // series slug (matches keys in lib/series.ts)
+  seriesOrder?: number;   // 1-based ordering within the series
 }
 
 export interface Post extends PostFrontmatter {
@@ -67,5 +69,11 @@ export function getAdjacentPosts(slug: string): {
     next: idx > 0 ? posts[idx - 1] : null,
     prev: idx < posts.length - 1 ? posts[idx + 1] : null,
   };
+}
+
+export function getPostsInSeries(seriesSlug: string): Post[] {
+  return getAllPosts()
+    .filter((p) => p.series === seriesSlug)
+    .sort((a, b) => (a.seriesOrder ?? 0) - (b.seriesOrder ?? 0));
 }
 

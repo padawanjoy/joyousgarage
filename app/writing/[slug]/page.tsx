@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { compileMDX } from "next-mdx-remote/rsc";
 import rehypePrettyCode from "rehype-pretty-code";
+import remarkGfm from "remark-gfm";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { Header } from "@/components/header";
@@ -15,6 +16,7 @@ import {
 import { SITE } from "@/lib/site-config";
 import { ShareButtons } from "@/components/share-buttons";
 import { AdSlot } from "@/components/ad-slot";
+import { SERIES } from "@/lib/series";
 
 interface PageProps {
   params: Promise<{ slug: string }>;
@@ -51,6 +53,7 @@ export default async function PostPage({ params }: PageProps) {
     components: mdxComponents,
     options: {
       mdxOptions: {
+        remarkPlugins: [remarkGfm],
         rehypePlugins: [
           [
             rehypePrettyCode,
@@ -63,6 +66,8 @@ export default async function PostPage({ params }: PageProps) {
       },
     },
   });
+
+  const series = post.series ? SERIES[post.series] : undefined;
 
   const jsonLd = {
     "@context": "https://schema.org",
@@ -94,6 +99,14 @@ export default async function PostPage({ params }: PageProps) {
     keywords: post.tags?.join(", "),
     articleSection: post.category,
     inLanguage: SITE.language,
+    ...(series && {
+      isPartOf: {
+        "@type": "CreativeWorkSeries",
+        name: series.name,
+        url: `${SITE.url}/series/${series.slug}`,
+      },
+      position: post.seriesOrder,
+    }),
   };
 
   return (
@@ -106,6 +119,13 @@ export default async function PostPage({ params }: PageProps) {
       <main className="post-main">
         <article className="post-article">
           <header className="post-header">
+            {series && (
+              <div className="post-series">
+                <Link href={`/series/${series.slug}`}>
+                  Series · {series.name} · {String(post.seriesOrder).padStart(2, "0")}
+                </Link>
+              </div>
+            )}
             <div className="post-meta-large">
               <span className="pill">{post.category}</span>
               <span className="sep">·</span>
@@ -122,7 +142,13 @@ export default async function PostPage({ params }: PageProps) {
           {post.tags && post.tags.length > 0 && (
             <footer className="post-tags">
               {post.tags.map((t) => (
-                <span key={t} className="chip">#{t}</span>
+                <Link
+                  key={t}
+                  href={`/writing?tag=${encodeURIComponent(t)}`}
+                  className="chip chip-link"
+                >
+                  #{t}
+                </Link>
               ))}
             </footer>
           )}

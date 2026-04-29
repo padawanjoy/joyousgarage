@@ -1,6 +1,7 @@
 import type { MetadataRoute } from "next";
 import { SITE } from "@/lib/site-config";
 import { getAllPosts } from "@/lib/posts";
+import { SERIES } from "@/lib/series";
 
 export default function sitemap(): MetadataRoute.Sitemap {
   const now = new Date();
@@ -21,5 +22,12 @@ export default function sitemap(): MetadataRoute.Sitemap {
     priority: 0.7,
   }));
 
-  return [...staticUrls, ...postUrls];
+  const seriesUrls: MetadataRoute.Sitemap = Object.keys(SERIES).map((slug) => ({
+    url: `${SITE.url}/series/${slug}`,
+    lastModified: now,
+    changeFrequency: "weekly",
+    priority: 0.7,
+  }));
+
+  return [...staticUrls, ...postUrls, ...seriesUrls];
 }
