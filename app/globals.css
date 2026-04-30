@@ -880,6 +880,16 @@ footer a:hover { color: var(--ink-strong); }
   font-weight: 600;
 }
 
+/* Inline images */
+.prose img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: var(--s-6) auto;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--mid) 25%, transparent);
+}
+
 /* GFM tables */
 .prose table {
   width: 100%;

@@ -1,0 +1,167 @@
+---
+title: "Resend 도메인 인증 (SPF·DKIM·DMARC) 셋업하기"
+date: "2026-05-01"
+category: "Tutorial"
+description: "Resend로 도메인을 인증하고 첫 메일을 발송하기까지, 단계별로 따라가는 기록."
+tags: ["newsletter", "resend", "dns", "spf", "dkim", "dmarc", "deliverability"]
+series: "newsletter"
+seriesOrder: 2
+---
+
+뉴스레터를 직접 구현하려면 첫 단추로 도메인 인증부터 해야 합니다. 도메인 인증은 받는 서버(Gmail 같은 곳)에 "이 메일은 도메인 주인이 직접 보낸 게 맞다"는 걸 증명하는 작업이에요. 누군가 내 도메인 이름을 도용해서 메일을 보내는 일을 막기 위한 장치죠. 인증이 안 된 메일은 도메인 사칭으로 의심받아 스팸함으로 직행하거나, 더 나쁜 경우엔 도메인 평판이 깎이기 시작합니다.
+
+확인까지 하루 정도 걸리지 않을까 예상했는데, 도메인 verified까지 19분, 첫 메일 발송까지 25분 정도면 끝났어요. 기술적으로 어려운 부분은 거의 없었습니다. 후이즈(whois.co.kr)에서 잠깐 헤맨 곳이 있긴 했는데, 그 부분도 함께 정리해 두려고 합니다.
+
+이번 글은 튜토리얼 성격이라, 따라 하실 수 있게 단계별로 정리했습니다.
+
+## Resend가 뭔지
+ 
+[Resend](https://resend.com)는 개발자용 이메일 발송 서비스예요. 뉴스레터를 직접 구현하려면 결국 어딘가에서 메일을 쏴야 하는데, 그 발송 인프라를 대신 맡아주는 도구라고 보시면 됩니다. 백엔드로는 AWS SES를 사용하고요.
+ 
+비슷한 서비스로는 SendGrid, Mailgun, Postmark, Amazon SES 같은 게 있습니다. 그중 Resend를 고른 이유는 다음과 같습니다.
+ 
+- API와 SDK가 깔끔합니다. 발송 한 통 보내는 데 필요한 코드가 정말 짧아요.
+- 무료 티어가 월 3,000건, 일일 100건까지 제공돼서 작은 뉴스레터로 시작하기에 충분합니다.
+- React 컴포넌트로 이메일 템플릿을 작성할 수 있는 [React Email](https://react.email)을 같은 팀에서 만들었어요. 나중에 발송 본문을 React로 짤 수 있다는 뜻입니다.
+- 대시보드가 직관적이고, 발송 로그·바운스·웹훅 같은 운영 도구가 잘 정리되어 있어요.
+
+## SPF·DKIM·DMARC가 뭔지
+
+셋업에 들어가기 전에 SPF·DKIM·DMARC가 무엇을 하는 건지도 한 번 짚고 가는 게 좋을 것 같아요.
+
+**SPF (Sender Policy Framework)** — "어떤 IP나 메일 서버가 이 도메인 이름으로 메일을 보낼 자격이 있는지"를 명시해 두는 TXT 레코드예요. 받는 서버, 가령 Gmail은 메일이 도착하면 발신 IP를 보고 SPF 목록을 조회합니다. 목록에 없으면 일단 의심하고 보는 거죠.
+
+**DKIM (DomainKeys Identified Mail)** — 한 단계 더 들어갑니다. 메일을 보낼 때 헤더와 본문에 도메인의 비밀 키로 서명을 박아요. 공개 키는 DNS의 TXT 레코드로 미리 공개해 두고요. 받는 서버가 그 공개 키로 서명을 검증해서 "이 메일은 진짜 이 도메인 주인이 만든 게 맞다"는 걸 확인합니다.
+
+**DMARC (Domain-based Message Authentication, Reporting and Conformance)** — 위에 둘을 묶어 정책을 정의해요. SPF나 DKIM 중 적어도 하나가 도메인과 정렬(align)되어 통과해야 정상이라고 선언하고, 실패할 때 어떻게 처리할지(`none` / `quarantine` / `reject`)도 함께 명시합니다. 거기에 "검증 결과 리포트는 이 메일로 보내라"까지 적어 둘 수 있고요.
+
+세 개가 모두 PASS여야 Gmail이 의심 없이 받은편지함에 떨어뜨려 줍니다. 하나라도 실패하면 스팸함으로 가거나, 평판이 깎이기 시작해요.
+
+그럼, 이제 본격적으로 시작해볼까요?
+
+## Step 1. Resend 가입과 region 선택
+
+Resend에 가입하고 도메인을 추가하려고 하니, 가장 먼저 region을 고르라고 합니다. Region 옵션으로는 4개가 나오는데요.
+
+저는 **us-east-1 (North Virginia)** 을 골랐습니다. 가장 보편적인 리전이라 트러블슈팅 자료가 풍부하다는 게 첫째 이유였어요. 한국 수신자에게 latency를 걱정해야 하나 잠깐 고민했지만, 메일 발송은 어차피 비동기라 큰 의미가 없겠다 싶어습니다. 도쿄(ap-northeast-1)로 할까도 생각해봤는데, 운영 안정성에 관한 자료는 us-east-1 쪽이 더 풍부하더라고요.
+
+소규모 운영에선 region이 큰 차이를 만들지 않아요. 너무 길게 고민할 필요 없습니다.
+
+## Step 2. DNS 레코드 4개 받기
+
+Region을 고르고 도메인을 입력하면, Resend가 DNS 레코드 네 개를 띄워줘요.
+
+![Resend DNS records 화면 — DKIM, SPF MX, SPF TXT, DMARC 네 개 레코드와 'I've added the records' 버튼](/images/email-auth-setup/01-resend-dns-records.webp)
+
+| 종류 | Type | Name | Content |
+|---|---|---|---|
+| DKIM | TXT | `resend._domainkey` | `p=MIG...AB` (긴 공개 키) |
+| SPF | MX | `send` | `feedback-smtp.us-east-1.amazonses.com` (priority 10) |
+| SPF | TXT | `send` | `v=spf1 include:amazonses.com ~all` |
+| DMARC | TXT | `_dmarc` | `v=DMARC1; p=none;` |
+
+DMARC는 화면상 "Optional"로 표시되지만, 도메인 평판을 추적하려면 하는게 좋습니다. 처음엔 `p=none` (관찰만, 차단 없음)으로 시작해서 평판이 자리 잡으면 단계적으로 `quarantine`, `reject`로 올리는면 좋겠죠?
+
+## Step 3. DNS에 등록
+
+저는 도메인을 후이즈(whois.co.kr)에서 등록하고 관리하고 있어요. DNS도 후이즈의 네임서버를 그대로 쓰고 있고요.
+ 
+후이즈에서 DNS 레코드를 추가하려면 다음 경로로 들어갑니다.
+ 
+> 후이즈 로그인 → 상단 **변경/이전** 메뉴 → **등록정보/네임서버 변경** → 관리할 도메인 클릭 → **네임서버 고급설정**
+ 
+여기서 위 네 개를 추가하려고 메뉴를 살펴봤는데요.
+ 
+whois.co.kr "네임서버 고급설정" 메뉴는 MX, SPF(TXT), A, CNAME, PTR, SRV로 분리돼 있어요. 보시면 알겠지만, **일반 TXT 레코드 메뉴가 따로 없습니다.** DKIM도 DMARC도 다 TXT 레코드인데 말이죠.
+ 
+다행히 SPF(TXT) 메뉴가 사실상 일반 TXT 추가용으로 작동했어요. 메뉴 이름만 SPF지, TXT 레코드면 종류 무관하게 받아주는 구조였습니다.
+ 
+또 한 가지 우려는 호스트명에 underscore(`_`) 허용 여부였어요. 후이즈 안내문에 "호스트명은 @, * 등의 특수문자를 포함할 수 없습니다"라고만 적혀 있었거든요. DKIM의 `resend._domainkey`나 DMARC의 `_dmarc`는 둘 다 underscore로 시작하는데 말이죠. 후이즈 DNS UI가 표준 DNS의 모든 패턴을 다 받아주지 않을 수도 있어서, 미리 우려가 됐어요.
+ 
+가장 짧은 DMARC부터 테스트로 던져 봤습니다. 호스트명에 `_dmarc`, 내용에 `v=DMARC1; p=none;` 만 적고 신청해봤는데, 다행히 underscore 등록은 문제가 없었습니다. 이제 안심하고 나머지를 추가할 수 있게 됐어요. DKIM TXT, SPF TXT를 같은 메뉴에서 차례로 추가하고, MX는 별도 메뉴(MX 레코드 관리)에서 추가했습니다. 네 개 모두 등록까지 5분쯤 걸렸네요.
+
+## Step 4. 도메인 검증 확인
+
+DNS 등록 직후 Resend 화면으로 돌아와 "I've added the records" 버튼을 눌렀어요. 처음엔 "Pending" 상태였는데, 17분쯤 지났을 때 DNS verified로 바뀌었고, 곧이어 19분 만에 Domain verified까지 끝났습니다.
+
+![Resend 도메인 상세 화면 — Status: Verified, Region: us-east-1, Domain events 타임라인에 Domain added · DNS verified · Domain verified 표시](/images/email-auth-setup/02-resend-verified.webp)
+
+DNS 전파는 보통 30분에서 24시간까지 걸린다고들 하는데, whois 네임서버가 이번엔 빠르게 풀어줬네요.
+
+전파 진행 상황을 직접 확인하고 싶다면 터미널에서 `dig`로 찔러볼 수 있어요.
+
+```bash
+dig TXT _dmarc.joyousgarage.com +short
+dig TXT resend._domainkey.joyousgarage.com +short
+dig TXT send.joyousgarage.com +short
+dig MX send.joyousgarage.com +short
+```
+
+답이 안 오면 다른 리졸버에 직접 물어봐도 됩니다.
+
+```bash
+dig @8.8.8.8 TXT _dmarc.joyousgarage.com +short
+```
+
+## Step 5. API key 발급
+
+도메인 인증이 끝났으니, 진짜 메일을 한 통 보내볼 차례예요. 발송하려면 API key가 필요한데, Resend 대시보드의 API keys 메뉴는 처음 들어가면 비어 있어요.
+
+![Resend 대시보드 API keys 메뉴 — 'No API keys yet' 상태와 우측 'Create API key' 버튼](/images/email-auth-setup/03-resend-api-keys.webp)
+
+"Create API key" 버튼으로 새 키를 만들 수 있어요. 다이얼로그가 열리면 이름, 권한, 도메인을 정합니다.
+
+![Add API Key 다이얼로그 — Name: joyousgarage-dev, Permission: Sending access, Domain: joyousgarage.com](/images/email-auth-setup/04-add-api-key.webp)
+
+저는 이번 키 이름을 `joyousgarage-dev`로 줬어요. 같은 키를 운영(prod)에도 그대로 쓰지 않을 계획이라, 이름에 환경(dev)을 못박아 뒀습니다. 권한은 발송에만 필요한 `Sending access`로 한정했고, 도메인은 `joyousgarage.com` 하나로 묶었습니다. 권한·도메인 범위를 좁힐수록 혹시나 키가 노출됐을 때 피해가 덜하니까요.
+
+발급된 키는 **딱 한 번만 보여줍니다.** 다이얼로그가 닫히면 다시 못 보니까 잘 저장해두세요.
+
+![View API Key 다이얼로그 — 'You can only see this key once. Store it safely.' 안내와 복사 버튼](/images/email-auth-setup/05-view-api-key.webp)
+
+그 자리에서 환경변수에 한 번 export하든, 비밀번호 매니저에 저장하든 처리해야 합니다. 채팅이나 git에 절대 평문으로 남기지 않게 신경 쓰는게 중요해요. 한 번 노출된 키는 돌이킬 수 없으니까, 발급할 때부터 dev/prod 분리해서 쓰는 습관을 들여 두는 게 안전합니다.
+
+## Step 6. 첫 메일 발송
+
+키도 받았으니 터미널에서 curl로 한 통 보내봤습니다.
+
+```bash
+curl -X POST 'https://api.resend.com/emails' \
+  -H "Authorization: Bearer $RESEND_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"from":"Padawan Joy <hello@joyousgarage.com>","to":["..."],"subject":"테스트","html":"<p>...</p>"}'
+```
+
+`{"id":"..."}` 응답이 오면 성공입니다.
+
+## Step 7. 인증 결과 확인 — Gmail 원본 보기
+
+Gmail에 메일이 왔는지 확인해볼까요?
+
+![Gmail 받은편지함 — 발신자 'Padawan Joy', 제목 'Resend 테스트 - 발송 테스트입니다.' 메일이 도착한 화면](/images/email-auth-setup/06-gmail-inbox.webp)
+
+스팸함이 아니라 받은편지함에 잘 도착했고, 발신자도 깔끔하게 표시됐습니다. 이제 메일을 열어서 인증 헤더도 확인해 봐야해요. 우상단 ⋮ 메뉴에서 "원본 표시"를 누르면 됩니다.
+
+![Gmail 메일 상세 — 우상단 ⋮ 메뉴를 펼쳐 '원본 표시' 항목이 강조 표시된 화면](/images/email-auth-setup/07-gmail-show-original.webp)
+
+원본 표시로 들어가면 SPF, DKIM, DMARC 결과가 한 화면에 정리되어 나와요. 결과는 아래처럼 3종 모두 PASS가 나왔어요.
+
+- SPF: PASS (IP 54.240.9.86 — Amazon SES)
+- DKIM: PASS (도메인 joyousgarage.com)
+- DMARC: PASS
+
+발신자는 `Padawan Joy <hello@joyousgarage.com>`로 깔끔하게 표시됐어요. **`via amazonses.com`** 같은 표시가 없는 게 핵심입니다. DKIM 서명 도메인이 발신자 도메인과 정렬(align)되어 있다는 신호거든요. Gmail이 "이 메일은 진짜 joyousgarage.com이 보낸 것"이라고 인정해줬다는 의미입니다.
+
+스팸함이 아니라 받은편지함에 도착했고, 인증 3종이 모두 통과했고, 발신자 표기도 깔끔하게 나왔습니다. 첫 발송으로 받을 수 있는 가장 좋은 결과 같아요.
+
+## 도메인 평판은 부드럽게
+
+기술적인 셋업이 끝났다고 해서 이 작업이 "끝"은 아닙니다. 도메인 평판은 시간이 만드는 거예요. "보낸 메일이 얼마나 자주 받은편지함에 잘 도착했는지", "스팸으로 분류되지 않았는지", "수신자가 신고하지 않았는지" 같은 신호들이 누적되면서 평판이 형성됩니다. 첫 발송 한 통이 PASS 통과했다고 평판이 생기는 게 아니라, 누적되어야 하는 거예요.
+
+당분간은 이렇게 운영하려고 해요. DMARC는 `p=none`으로 두어 차단 없이 관찰만 하고, 발송량은 천천히 늘리면서 평판을 빌드업합니다. Resend 대시보드에서 bounce, complaint 비율을 모니터링해서 이상한 신호가 보이면 빨리 잡으려고 해요. DMARC를 `quarantine`이나 `reject`로 단계적으로 올리는 건 한참 후에 고려할 일이고요.
+
+## 다음 글
+
+이번 작업으로 도메인이 메일을 보낼 자격을 얻었습니다. 다음 글에서는 구독 폼을 살리고 `/api/subscribe` 라우트로 구독자를 저장하는 작업으로 이어집니다. 거기까지 닿아야 비로소 "뉴스레터"라고 부를 수 있게 되거든요.
+ 
+한 단계씩, 천천히 진행해보겠습니다.
