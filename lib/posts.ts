@@ -50,7 +50,14 @@ export function getAllPosts(): Post[] {
     });
   }
 
-  posts.sort((a, b) => +new Date(b.date) - +new Date(a.date));
+  posts.sort((a, b) => {
+    const byDate = +new Date(b.date) - +new Date(a.date);
+    if (byDate !== 0) return byDate;
+    if (a.series && a.series === b.series) {
+      return (b.seriesOrder ?? 0) - (a.seriesOrder ?? 0);
+    }
+    return 0;
+  });
   return posts;
 }
 
