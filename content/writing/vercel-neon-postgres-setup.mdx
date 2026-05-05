@@ -1,0 +1,210 @@
+---
+title: "Vercel에 Neon Postgres 붙이기"
+date: "2026-05-06"
+category: "Tutorial"
+description: "DB와 ORM을 고르고, Vercel에 Neon을 붙이는 과정."
+tags: ["newsletter", "neon", "drizzle", "postgres", "vercel", "orm"]
+series: "newsletter"
+seriesOrder: 3
+---
+
+지난 글에서 도메인이 메일을 보낼 자격을 얻었어요. 다음 차례는 메일을 받을 사람들을 어딘가에 저장해 두는 일입니다.
+
+두 가지를 골라야 하는데요. 먼저 정할 것은 어떤 DB를 쓸 거고 그 DB를 코드에서 어떻게 다룰지입니다. 두 번째는 ORM이라 부르는 도구를 정하는 일이에요. ORM은 Object-Relational Mapping의 약자로, **DB의 row(테이블 한 줄)와 코드의 객체/타입을 자동으로 연결해주는 도구**입니다. 결정이 끝나면 Vercel Marketplace로 Neon DB를 붙이고, 로컬에서도 같은 DB로 연결할 수 있게 환경 변수 작업까지 다뤄보겠습니다.
+
+## 어떤 DB를 쓸까
+
+두 가지 중에서 고민을 했는데요.
+
+- **Neon** — 서버리스 Postgres, scale-to-zero 지원
+- **Supabase** — Postgres + Auth + Storage + Realtime을 묶은 풀패키지
+
+Vercel Marketplace에서 Postgres를 추가하면 사실상 이 둘 중 하나를 고르는 구조라, 다른 후보를 더 살펴볼 이유는 없었습니다.
+
+| 항목 | Neon | Supabase |
+|---|---|---|
+| 무료 DB 용량 | 0.5 GB / 프로젝트 | 500 MB |
+| 무료 프로젝트 수 | 100개 | **2개 (제한)** |
+| 무료 컴퓨트 | 100 CU-hour/월 (5분 idle 후 scale-to-zero) | 시간 무제한, 단 **1주 비활성 시 일시중지** |
+| 유료 진입 | 사용량 기반, 월 최소 0원 | $25/월 Pro 플랜 (flat) |
+| 자동 백업 (무료) | 6시간 복구 윈도우 | 없음 |
+| 추가 서비스 | 순수 Postgres만 | Auth · Storage · Realtime · Edge Functions 번들 |
+| Vercel 통합 | 1-click, default 옵션 | Marketplace 가능, 손이 더 감 |
+
+저는 Neon으로 결정을 했는데요. 이유는 다음과 같습니다.
+
+**첫째, Supabase의 1주 사용 텀이 생기면 일시중지가 되어버리는 점이 제 블로그 상황에서는 가장 위험합니다.** 구독 폼 트래픽이 적어서 일주일 동안 새 가입이 0이면 DB가 paused 상태가 된다는 의미인데요. 그 다음 사용자가 가입을 시도하면 cold start에 걸리거나, 더 나쁜 경우엔 실패할 수도 있다는 거니까 제일 걱정되는 부분이었습니다. 규모가 작은 사이트일수록 이 상황에 빠지기 쉬우니까요. Neon의 scale-to-zero는 비슷해 보이지만, 5분 idle 후 자동 sleep, 다시 깨어날 때는 1~2초 cold start로 끝납니다. 가입자가 잠깐 기다릴 뿐 실패해버리지는 않으니까요.
+
+**둘째, Supabase의 풀패키지 기능이 제 블로그에겐 쓸모가 없습니다.** Auth는 다음 글에서 다룰 이중 옵트인을 직접 만들 계획이고, Storage는 이미지를 public/ 폴더로 서빙하는 구조라 쓸 일이 없고, Realtime 같은 실시간 기능도 제 블로그엔 필요가 없거든요. Postgres 하나만 필요한 상황이기 때문에, Postgres 전문인 Neon이 더 적합한 케이스였습니다.
+
+**셋째, "Vercel + Resend + Neon" 조합의 한국어 참고 자료가 거의 없더라고요.** Supabase 자료는 이미 풍부해서, 많이 없는 조합을 한번 다뤄보고 싶었습니다. 
+
+이런 이유들로 저는 Neon을 골랐습니다.
+
+## ORM은 왜 필요하고, 어떤 걸 쓸까
+
+DB를 골랐으니, 이제 그 DB를 코드에서 어떤 도구로 다룰지 정할 차례예요. 흔히 쓰이는 도구는 크게 세 가지로 나눌 수 있습니다.
+
+- **Raw SQL 드라이버** — `pg`, `postgres` 같은 라이브러리. SQL 문자열을 직접 씁니다.
+- **Query Builder + 가벼운 ORM** — `Drizzle`, `Kysely`. SQL을 TypeScript 함수로 감싼 형태.
+- **전형적 ORM** — `Prisma`, `TypeORM`. 별도 DSL로 스키마를 적고, 코드를 자동 생성합니다.
+
+DB는 SQL로 말하고 코드는 객체로 말하는데, 그 사이를 매번 직접 변환하면 번거롭고 실수도 생기거든요. ORM이 그 변환을 대신해주는 역할을 합니다. 
+
+위 분류에 'DSL'이라는 용어가 나와서 잠깐 알아볼게요. DSL은 Domain-Specific Language의 약자로, **특정 작업에 맞춰 만들어진 전용 언어**를 말해요. Prisma의 경우 SQL도 TypeScript도 아닌 자체 스키마 문법(`schema.prisma`)으로 모델을 정의하는데, 그 자체 문법이 곧 DSL이에요. 새 ORM을 도입하려면 그 ORM만의 DSL을 따로 학습해야 한다는 뜻이기도 합니다.
+
+감을 잡으려면 같은 작업을 세 가지 방식으로 비교해 보는 게 가장 빨라요. **구독자 한 명을 이메일로 조회**하는 작업으로 예를 들어볼게요.
+
+Raw SQL (`pg` 드라이버):
+
+```typescript
+const result = await client.query(
+  "SELECT * FROM subscribers WHERE email = $1",
+  [email]
+);
+const subscriber = result.rows[0];
+// 이때 subscriber의 타입은 'any'가 됩니다. TypeScript가 그 안에 어떤 컬럼이 들어 있는지
+// 알지 못하는 상태라는 뜻이에요.
+// 그래서 subscriber.emial 같은 오타가 있어도 컴파일은 그냥 통과하고,
+// 실제로 코드를 실행했을 때 undefined가 나오면서 뒤늦게 에러가 발생합니다.
+```
+
+Drizzle:
+
+```typescript
+const subscriber = await db
+  .select()
+  .from(subscribers)
+  .where(eq(subscribers.email, email));
+// subscribers.email 부분에 오타를 내면 IDE가 즉시 빨간 줄로 표시하고,
+// 컴파일 단계에서 에러로 막힙니다. 실행해보기 전에 에러 확인이 되는 거죠.
+// 결과의 타입도 { id: number, email: string, ... } 같이 자동으로 정해지기 때문에,
+// 다음 줄에서 subscriber.email을 쓸 때 자동완성이 됩니다.
+```
+
+Prisma:
+
+```typescript
+const subscriber = await prisma.subscriber.findUnique({
+  where: { email },
+});
+// 오타나 잘못된 컬럼은 Drizzle처럼 컴파일 시점에 잡아줍니다.
+// 다만 실제로 어떤 SQL이 실행되는지 코드만 보고는 알기 어려워요.
+// 추상화가 두꺼운 만큼, 의도와 다른 쿼리가 나올 때 추적하기 까다로워집니다.
+```
+
+특성을 표로 정리하면 이렇습니다.
+
+| | Raw SQL | Drizzle | Prisma |
+|---|---|---|---|
+| 추상화 정도 | 없음 | 얇음 (SQL이 그대로 보임) | 두꺼움 (DSL로 별도 학습) |
+| 타입 안전 | 없음 (직접 만들어야) | 자동 | 자동 |
+| 마이그레이션 | 직접 SQL 작성 | drizzle-kit이 diff 자동 생성 | prisma migrate가 자동 |
+| 번들 크기 | 가장 작음 | 작음 | 중간 (Prisma 7부터 대폭 축소) |
+| 러닝 커브 | SQL만 알면 됨 | SQL 알면 거의 즉시 | DSL 별도 학습 필요 |
+
+저는 Drizzle을 골랐어요.
+
+SQL이 손에 익은 사람이라면 **Drizzle은 SQL을 TypeScript 함수로 감싼 도구** 정도라서 이해하기 직관적이거든요. 새로운 DSL을 배울 필요도 없고, raw SQL처럼 타입을 매번 손으로 만들 필요도 없어서 좋아요. Vercel + Neon 환경에서 cold start가 가벼운 점도 좋고, 마이그레이션을 SQL 형태 그대로 자동 생성해주는 점도 마음에 들었어요. 어떤 변경이 DB에 적용되는지 SQL로 직접 확인할 수 있거든요.
+
+이제 본격적으로 시작해볼게요.
+
+## Step 1. Vercel Marketplace에서 Neon 추가
+
+Vercel 프로젝트에서 시작합니다. 좌측 사이드바 **Storage** 탭으로 들어가서, 우상단 **Create Database** 버튼을 누릅니다.
+
+![Vercel 프로젝트 사이드바 — Storage 메뉴 강조 + Connect to a Database 화면 우상단 Create Database 버튼 강조](/images/vercel-neon-postgres-setup/01-vercel-storage-tab.webp)
+
+다이얼로그가 열리면 Marketplace Database Providers 섹션에서 **Neon (Serverless Postgres)** 을 고릅니다.
+
+![Browse Storage 다이얼로그 — Marketplace Database Providers 목록에서 Neon 항목이 강조 표시된 화면](/images/vercel-neon-postgres-setup/02-browse-storage.webp)
+
+Terms of Service에 동의하고 나면 Configuration and Plan 단계가 시작됩니다.
+
+![Install Integration 다이얼로그 — Neon 소개 + Terms of Service 체크 완료 + Configuration and Plan 단계 진입](/images/vercel-neon-postgres-setup/03-install-integration.webp)
+
+Configuration 단계에서 가장 중요한 건 **Region** 입니다. 여기서 골라야 할 region은 본인 Vercel 프로젝트가 배포되는 region이에요. 두 region이 다르면 함수가 호출될 때마다 region 사이를 오가는 시간이 추가됩니다. 무료 티어를 잘 쓰려면 같은 region에 두는 게 좋습니다.
+
+![Install Integration — Configuration and Plan 단계, Region 드롭다운에 Washington, D.C., USA (East) 선택, Auth toggle off, Free 플랜 선택 화면](/images/vercel-neon-postgres-setup/04-region-selection.webp)
+
+본인 Vercel 프로젝트의 region을 모르겠다면 잠깐 다른 탭으로 빠져서 확인하면 됩니다.
+
+> Vercel 프로젝트 → Settings → Functions → Function Region
+
+확인 후 같은 region을 고릅니다. 저는 us-east-1 (Washington, D.C.)에 배포하고 있어서 Neon도 같은 곳으로 맞췄어요. Auth 토글은 OFF로 뒀습니다. Neon이 제공하는 인증 모듈은 여기서 안 쓸 거거든요. 자체 이중 옵트인을 만들 계획이라서요.
+
+다음 단계는 Resource Name을 정합니다. Vercel 대시보드와 Neon 양쪽에서 이 이름으로 표시되는 식별자라, 의미 있는 이름을 주는 게 좋아요. 저는 `joyousgarage-newsletter`로 적었습니다.
+
+![Install Integration — Confirmation 단계, Resource Name 입력란에 joyousgarage-newsletter 입력, Region: Washington D.C. iad1, Free 플랜 정보, 우하단 Create 버튼 강조](/images/vercel-neon-postgres-setup/05-confirmation.webp)
+
+Free 플랜 정보가 같은 화면에 보입니다.
+
+- Storage: 0.5 GB / 프로젝트
+- Maximum projects: 100
+- Sizes up to: 2 CU, 8 GB RAM
+- Compute time: 100 CU-hours / 프로젝트
+
+작은 규모 블로그의 뉴스레터에서 이걸 넘기게 되는 시점이 오면, 그땐 그것대로 즐거운 고민이겠죠?
+
+Create를 누르면 잠시 후 provisioning 완료 화면으로 넘어갑니다.
+
+![Database Provisioning 완료 — Your Neon database is ready to use, joyousgarage-newsletter has been successfully created, Continue 버튼](/images/vercel-neon-postgres-setup/06-database-ready.webp)
+
+Continue를 누르면 마지막 단계로 넘어갑니다. 어느 환경에 이 DB를 사용할지, branching을 켤지 결정하는 단계입니다.
+
+![Install Integration — Connect a Project, joyousgarage 검색, Environments에 Development/Preview/Production 모두 체크, Create database branch for deployment의 Preview/Production은 체크 해제, Custom Prefix 비움, Sensitive 토글 OFF](/images/vercel-neon-postgres-setup/07-connect-project.webp)
+
+여기서 정해야 할 게 몇 가지 있어요.
+
+- **Environments** — Development / Preview / Production 모두 체크. 세 환경 모두 같은 DB를 보게 됩니다. 작은 블로그라서 환경마다 DB를 분리할 이유가 없어요.
+- **Create database branch for deployment** — Preview / Production 둘 다 **해제**. 이 옵션은 배포마다 별도 DB 브랜치를 자동 생성합니다 (PR 단위 격리에 좋음). 강력한 기능이지만 우리는 PR 기반 워크플로우가 아니고, 컴퓨트 한도(100 CU-hour)를 빨리 소진하는 부작용도 있는 옵션이기 때문에, 나중에 schema migration이 잦아지면 그때 켜도 늦지 않습니다.
+- **Custom Prefix** — 비워둠. 기본 `DATABASE_URL`, `POSTGRES_*` 같은 컨벤션 이름을 받는 게 라이브러리들과 잘 맞습니다. 직접 prefix를 적으면 쿼리할 때마다 명시해야 하거든요.
+- **Sensitive** — OFF로 둬도 괜찮습니다. ON으로 두면 Vercel UI에서 값이 가려지는 정도의 차이가 있습니다.
+
+Connect를 누르면 Vercel 프로젝트의 환경변수에 자동으로 변수들이 추가됩니다. `DATABASE_URL`, `DATABASE_URL_UNPOOLED`, `POSTGRES_HOST`, `POSTGRES_USER`, `PGUSER` 등 다양한 이름으로 제공돼서 어떤 라이브러리든 그대로 쓸 수 있게 입력되도록 해둔 겁니다.
+
+## Step 2. Vercel CLI 설치 + 로컬에 env 가져오기
+
+Vercel에 박힌 환경변수를 로컬 개발에서도 쓰려면 `.env.local` 파일로 가져와야 합니다. (수동으로 해도 되지만, 좀 더 편하게 해보겠습니다.) 그러려면 Vercel CLI가 필요해요. 설치 방법은 두 가지가 있는데, 본인 상황에 맞춰 고르면 됩니다.
+
+**(A) 전역 설치 — 한 번 설치해두고 계속 사용**
+
+```bash
+npm i -g vercel
+```
+
+**(B) 매번 npx로 실행**
+
+```bash
+npx vercel <명령어>
+```
+
+저는 Vercel로 여러 사이드 프로젝트를 운영하고 있어서 편의상 이미 전역 설치가 되어 있어요. 한두 프로젝트만 잠깐 다룰 거라면 (B) 방식이 노트북에 패키지를 덜 남길 수 있어 깔끔합니다.
+
+설치 후 로그인하고, 현재 프로젝트를 Vercel 프로젝트와 연결합니다.
+
+```bash
+vercel login   # 브라우저가 열리며 인증
+vercel link    # 현재 디렉토리를 어떤 Vercel 프로젝트와 연결할지 묻는 과정
+```
+
+`vercel link` 진행 중에 이런 것들을 묻습니다.
+
+- `Set up "..."?` → **Y**
+- `Which scope should contain your project?` → 본인 계정
+- `Link to existing project?` → **Y**
+- `Which existing project do you want to link?` → 프로젝트 이름 입력
+
+성공하면 프로젝트 루트에 `.vercel/` 폴더가 생깁니다.
+
+`vercel link` 마지막에 환경변수도 바로 가져올 거냐고 물어봅니다. **Y**로 진행하면 `.env.local`까지 만들어져요. `vercel link` 과정이 아니라 별도로 진행할거라면 이렇게 할 수도 있습니다.
+
+```bash
+vercel env pull .env.local
+```
+
+`.env.local` 안을 잠깐 들여다보면 `DATABASE_URL`, `DATABASE_URL_UNPOOLED`, `POSTGRES_HOST`, `POSTGRES_USER`, ... 이런 키들이 들어 있을 거예요. 키 이름은 다양하지만 결국 같은 DB로 가는 다른 이름들입니다. 여기서 한 가지만 알아두면 돼요. **`DATABASE_URL`은 connection pooling을 거치는 URL이고, `DATABASE_URL_UNPOOLED`은 직접 연결되는 URL입니다.** 마이그레이션 도구는 후자를 써야 합니다. PgBouncer 같은 풀러가 끼어 있으면 DDL 작업이 깨끗하게 처리되지 않거든요.
+
+## 마치며
+
+여기까지 작업하니 Vercel에 Neon DB가 붙고, 로컬에 환경 변수까지 설정된 상태가 됐어요. 인프라는 깔렸지만, Postgres 위에는 아직 테이블이 한 개도 없고, 코드에서 다룰 ORM도 설치 전입니다. 다음 글에선 Drizzle을 설치하고 첫 테이블 스키마를 정의해 Neon에 마이그레이션을 적용해보겠습니다.
