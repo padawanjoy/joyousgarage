@@ -578,6 +578,70 @@ main { max-width: 1180px; margin: 0 auto; padding: 0 var(--s-6) var(--s-10); }
     inset -1px -1px 3px rgba(255, 255, 255, 0.3),
     inset 2px 2px 4px rgba(var(--sh-dark), 0.3);
 }
+.cta-form input:disabled,
+.cta-form button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.cta-form button:disabled { transform: none; }
+
+.cta-form-area {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  align-items: flex-end;
+}
+.cta-success {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-3) var(--s-5);
+  background: var(--base);
+  border-radius: 18px;
+  box-shadow: var(--neu-pressed);
+  max-width: 360px;
+}
+.cta-success-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  flex-shrink: 0;
+}
+.cta-success-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.4;
+}
+.cta-success-text strong {
+  font-weight: 600;
+  color: var(--ink-strong);
+  font-size: 0.95rem;
+}
+.cta-success-text small {
+  font-size: 0.78rem;
+  color: var(--ink);
+  opacity: 0.7;
+}
+.cta-form-foot {
+  display: flex;
+  gap: var(--s-3);
+  align-items: center;
+  font-size: 0.82rem;
+}
+.cta-error { color: var(--accent); }
+.cta-rss-link {
+  color: var(--ink);
+  text-decoration: none;
+  opacity: 0.65;
+  transition: opacity .2s var(--ease);
+}
+.cta-rss-link:hover { opacity: 1; }
 
 /* Footer */
 footer {
@@ -699,6 +763,9 @@ footer a:hover { color: var(--ink-strong); }
   .cta-copy p { margin: 0 auto; }
   .cta-form { width: 100%; flex-direction: column; }
   .cta-form input { width: 100%; min-width: 0; }
+  .cta-form-area { width: 100%; align-items: stretch; }
+  .cta-success { max-width: none; align-self: center; }
+  .cta-form-foot { justify-content: center; flex-wrap: wrap; }
   .footer-inner { grid-template-columns: 1fr; gap: var(--s-6); padding: 0 var(--s-4); }
   .footer-bottom { padding: var(--s-5) var(--s-4); }
 }
