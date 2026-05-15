@@ -8,6 +8,13 @@
       "when": 1777636883679,
       "tag": "0000_gifted_wong",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1778801367277,
+      "tag": "0001_loose_paper_doll",
+      "breakpoints": true
     }
   ]
 }
