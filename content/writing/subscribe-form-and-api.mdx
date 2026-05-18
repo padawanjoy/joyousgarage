@@ -1,0 +1,429 @@
+---
+title: "구독 가입 API 라우트 만들기"
+date: "2026-05-18"
+category: "Tutorial"
+description: "구독 폼을 통해 이메일을 받고, 토큰 발급과 확인 메일 발송까지"
+tags: ["newsletter", "nextjs", "drizzle", "resend", "double-opt-in"]
+series: "newsletter"
+seriesOrder: 5
+---
+
+지난 글까지 인프라 작업을 해봤습니다. 이를 통해 현재, 도메인이 메일을 보낼 자격을 얻었고, Neon Postgres에 `subscribers` 테이블이 만들어진 상태입니다. 이제 실제 구독 폼을 통해 이메일 입력을 받고, 그 폼이 호출할 `/api/subscribe` 라우트를 새로 만들어 보죠.
+
+이번에 만들 흐름은 이래요. 누군가 이메일을 입력하고 '구독하기' 버튼을 누르면, 그 사람의 메일함으로 가입 확정 링크가 담긴 메일이 도착합니다. 그 링크를 눌러야 가입이 진짜로 확정되고요. 이런 방식을 '이중 옵트인(double opt-in)'이라고 부릅니다. 이메일을 입력했다고 바로 구독자로 등록하는 게 아니라, 메일함을 통해서 '본인이 맞는지'를 한 번 더 확인받는 절차예요. 사용자가 링크를 눌렀을 때 실제로 가입을 확정해주는 페이지는 다음 글에서 만들 거예요.
+
+## Step 1. 스키마에 두 가지 변경
+
+지난 글에서 만들어 둔 `subscribers` 테이블엔 `confirmation_token` 컬럼이 있었어요. 이 테이블에 두 가지를 수정하겠습니다. **컬럼 이름을 `confirmation_token_hash`로 바꾸고, 만료 시각용 `confirmation_token_expires_at` 컬럼을 추가**할게요. 그리고 짧은 시간에 같은 사람이 너무 자주 요청을 보내는 걸 막아주는 '레이트 리밋(rate limit)'용 테이블 하나를 새로 만들어 둘게요.
+
+```typescript
+// lib/db/schema.ts
+import { pgTable, serial, varchar, text, timestamp, integer } from "drizzle-orm/pg-core";
+
+export const subscribers = pgTable("subscribers", {
+  id: serial("id").primaryKey(),
+  email: varchar("email", { length: 254 }).notNull().unique(),
+  status: varchar("status", { length: 20 }).notNull().default("pending"),
+  confirmationTokenHash: text("confirmation_token_hash"),
+  confirmationTokenExpiresAt: timestamp("confirmation_token_expires_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  confirmedAt: timestamp("confirmed_at"),
+});
+
+export const rateLimit = pgTable("rate_limit", {
+  key: varchar("key", { length: 255 }).primaryKey(),
+  count: integer("count").notNull().default(1),
+  windowStartedAt: timestamp("window_started_at").notNull().defaultNow(),
+});
+```
+
+이 스키마를 짤 때 고민한 부분이 몇 가지 있어요. 하나씩 살펴볼게요.
+
+**`confirmation_token` → `confirmation_token_hash`**
+
+평문 토큰을 그대로 저장하지 않고 해시만 둘 거라서 이름을 바꿨습니다. DB가 유출되거나 백업 파일이 노출되더라도, 거기 적힌 값으로는 가입 확정 링크를 위조할 수 없게 만들기 위해 해시만 두려고 합니다. 사용자 메일에는 원본을, DB에는 SHA-256 해시를 저장하는 패턴인거죠.
+
+**`confirmation_token_expires_at`**
+
+확인 메일 링크는 실제 사용자가 맞는지 확인하는 목적이기때문에 영원히 유효하면 안 됩니다. 저는 유효 기간을 24시간으로 잡았어요. 만료 시각을 컬럼으로 갖고 있으면 검증 단계에서 쉽게 처리할 수 있으니까요. 만료된 row를 주기적으로 정리하는 작업은 나중에 cron으로 붙일 예정이라, 컬럼만 미리 만들어 둡니다.
+
+**`rate_limit` 테이블**
+
+이번 라우트는 외부에 공개돼요. 누구나 이 주소로 요청을 보낼 수 있다는 뜻이라, 한 시간에 같은 이메일을 5번, 같은 IP를 10번까지만 받도록 막아둘 거예요. 자동으로 폼을 호출하는 봇을 차단하기 위한 안전장치인 셈이죠. IP와 이메일을 별도 테이블로 분리할 필요가 없어서, `key` 컬럼 하나에 접두어를 붙여 한 테이블에 같이 뒀습니다. `ip:1.2.3.4` 와 `email:foo@bar.com` 같은 형식으로요.
+
+스키마를 고쳤으니 마이그레이션을 생성합니다.
+
+```bash
+npm run db:generate
+```
+
+drizzle-kit은 컬럼 이름만 바꾼 건지(rename), 아니면 기존 컬럼을 지우고 새 컬럼을 추가한 건지(create)를 코드만 봐서는 판단할 수 없습니다. 그래서 drizzle-kit이 터미널에서 직접 우리한테 물어봅니다. 저는 `confirmation_token_hash`는 **renamed from `confirmation_token`**, `confirmation_token_expires_at`은 **created**를 골랐어요. 생성된 SQL은 다음과 같습니다.
+
+
+```sql
+CREATE TABLE "rate_limit" (
+  "key" varchar(255) PRIMARY KEY NOT NULL,
+  "count" integer DEFAULT 1 NOT NULL,
+  "window_started_at" timestamp DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+ALTER TABLE "subscribers" RENAME COLUMN "confirmation_token" TO "confirmation_token_hash";
+ALTER TABLE "subscribers" ADD COLUMN "confirmation_token_expires_at" timestamp;
+```
+
+DB에 반영하겠습니다.
+
+```bash
+npm run db:migrate
+```
+
+## Step 2. 레이트 리밋 헬퍼
+
+별도의 Redis나 Upstash 없이 Postgres 한 테이블만으로 처리하겠습니다. '1시간 안에 N번까지만 허용'이라는 식으로, 정해진 시간 구간(윈도우) 안에서 횟수를 세는 방식이에요. 보통 이걸 '고정 윈도우(fixed window)'라고 부릅니다.
+
+```typescript
+// lib/rate-limit.ts
+import { eq } from "drizzle-orm";
+import { db } from "./db";
+import { rateLimit } from "./db/schema";
+
+const WINDOW_MS = 60 * 60 * 1000;
+
+export async function checkAndIncrementRateLimit(
+  key: string,
+  limit: number,
+): Promise<boolean> {
+  const now = new Date();
+  const windowStart = new Date(now.getTime() - WINDOW_MS);
+
+  const existing = await db
+    .select()
+    .from(rateLimit)
+    .where(eq(rateLimit.key, key));
+
+  if (existing.length === 0) {
+    await db.insert(rateLimit).values({ key, count: 1, windowStartedAt: now });
+    return true;
+  }
+
+  const record = existing[0];
+
+  if (record.windowStartedAt < windowStart) {
+    await db
+      .update(rateLimit)
+      .set({ count: 1, windowStartedAt: now })
+      .where(eq(rateLimit.key, key));
+    return true;
+  }
+
+  if (record.count >= limit) {
+    return false;
+  }
+
+  await db
+    .update(rateLimit)
+    .set({ count: record.count + 1 })
+    .where(eq(rateLimit.key, key));
+  return true;
+}
+```
+
+키마다 윈도우는 따로 계산됩니다. 처음 호출되면 row를 만들고 1로 시작하고, 윈도우가 지났으면 1로 리셋하고, 아직 남았으면 count를 올려가요. 다만 동시에 여러 요청이 몰리면 SELECT와 UPDATE 사이의 잠깐의 틈에서 카운트가 어긋날 수 있어요. 보통 race condition이라고 부르는 상황입니다. 다만 여기는 최소 방어선 역할이 목적이라, 윈도우당 약간 더 통과되더라도 큰 문제가 아니라서 이 정도로 둡니다. 더 엄격하게 막아야 할 부분이 생기면 그때 Postgres의 advisory lock으로 옮기면 됩니다.
+
+## Step 3. /api/subscribe 라우트
+
+이제 라우트를 만들어보겠습니다. 안에서 처리할 순서는 다음과 같습니다.
+
+1. 사용자가 입력한 이메일의 형식이 올바른지 검사
+2. IP와 이메일 순서로 레이트 리밋에 걸리는지 확인
+3. 이미 가입된 이메일인지 조회하고, 상태에 따라 다르게 처리
+4. 새 토큰을 만들어 사용자 메일에는 원본을, DB에는 해시를 저장
+5. 어떤 경우든 클라이언트에는 같은 응답을 돌려줌 (응답이 경우마다 다르면 임의 이메일을 넣어보면서 누가 가입했는지 알아낼 수 있거든요)
+
+```typescript
+// app/api/subscribe/route.ts
+import { createHash, randomBytes } from "node:crypto";
+import { eq } from "drizzle-orm";
+import { NextRequest, NextResponse } from "next/server";
+import { db } from "@/lib/db";
+import { subscribers } from "@/lib/db/schema";
+import { checkAndIncrementRateLimit } from "@/lib/rate-limit";
+import { SITE } from "@/lib/site-config";
+
+const TOKEN_EXPIRY_MS = 24 * 60 * 60 * 1000;
+const RESEND_GRACE_MS = 5 * 60 * 1000;
+const EMAIL_RATE_LIMIT = 5;
+const IP_RATE_LIMIT = 10;
+const FROM_ADDRESS = "Padawan Joy <hello@joyousgarage.com>";
+
+function genericResponse() {
+  return NextResponse.json({
+    message: "확인 메일을 보냈어요. 받은편지함과 스팸함을 확인해 주세요.",
+  });
+}
+
+function isValidEmail(email: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254;
+}
+
+function generateToken() {
+  const raw = randomBytes(32).toString("hex");
+  const hash = createHash("sha256").update(raw).digest("hex");
+  return { raw, hash };
+}
+```
+
+상수들을 라우트 파일 위쪽에 모아뒀어요. 토큰 만료 24시간, 같은 이메일로 재발송 요청이 들어와도 5분 안에는 다시 보내지 않는 짧은 유예 시간(grace window), 그리고 한 시간당 IP 10회 · 이메일 5회 제한을 위한 상수들입니다.
+
+토큰 생성 부분이 이번 글에서 가장 중요한 부분인데요. `randomBytes(32)`로 256bit 랜덤을 뽑아 hex로 변환합니다. 64글자짜리 문자열이 되는데, **이게 사용자 메일로 나가는 원본 토큰입니다**. 그리고 SHA-256으로 한 번 더 해시한 값을 DB에 저장했어요. 가입 확정 페이지에서 사용자가 들고 오는 원본 토큰을 받아 같은 방식으로 해시한 뒤, DB의 해시와 비교하는 것만으로도 검증은 끝납니다. 단방향 해시라서 DB 쪽이 노출되더라도 원본을 복원할 수가 없거든요.
+
+UUID나 JWT 대신 randomBytes를 쓴 이유가 있는데요. UUID v4도 충분히 랜덤이긴 한데, 128bit라서 256bit인 randomBytes에 비하면 그만큼 추측당할 여지가 조금 더 있어요. 그리고 UUID는 워낙 식별자(ID) 용도로 쓰는 경우가 많아서, 코드만 봐서는 'ID가 아니라 보안 토큰이다'라는 의도가 안 드러나거든요. JWT는 토큰 안에 정보를 다 담는 방식이라, 서버에 따로 저장하지 않아도 검증할 수 있다는 장점이 있는데요. 대신 만료되기 전에 강제로 무효화하려면 결국 별도 저장소가 또 필요해져요. 어차피 가입자 정보는 DB에 저장해야 하니까, DB에 해시를 저장하고 사용자가 들고 온 토큰과 비교하는 방식이 이 경우에 가장 단순하고 잘 맞겠더라고요.
+
+이제 POST 핸들러입니다.
+
+```typescript
+export async function POST(req: NextRequest) {
+  let body: { email?: string };
+  try {
+    body = await req.json();
+  } catch (err) {
+    console.warn("[/api/subscribe] body parse failed:", err);
+    return genericResponse();
+  }
+
+  const email = body.email?.toLowerCase().trim();
+  if (!email || !isValidEmail(email)) {
+    console.warn("[/api/subscribe] invalid email format");
+    return genericResponse();
+  }
+
+  const ip =
+    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
+
+  const ipOk = await checkAndIncrementRateLimit(`ip:${ip}`, IP_RATE_LIMIT);
+  if (!ipOk) {
+    console.warn(`[/api/subscribe] IP rate limit exceeded: ${ip}`);
+    return genericResponse();
+  }
+
+  const emailOk = await checkAndIncrementRateLimit(
+    `email:${email}`,
+    EMAIL_RATE_LIMIT,
+  );
+  if (!emailOk) {
+    console.warn(`[/api/subscribe] email rate limit exceeded: ${email}`);
+    return genericResponse();
+  }
+```
+
+여기서 한 가지 보안 측면에서 결정한 것이 있는데요. 응답은 어떤 경우든 똑같이 돌려주려고 합니다. "이미 가입된 이메일입니다"나 "잘못된 형식입니다" 같은 구체적인 메시지는 보내지 않으려고요. 응답이 상황에 맞춰서 매번 다르면, 누군가 폼에 임의의 이메일을 하나씩 넣어보면서 누가 가입했는지 알아낼 수 있거든요. 이걸 보안 용어로 이메일 enumeration이라고 부릅니다.
+ 
+다만 서버 로그에는 원인이 남아야 디버깅이 가능하니까, `console.warn`으로 어디서 막혔는지 기록해 뒀어요. Vercel 로그에만 찍히고 사용자한테는 노출되지 않도록이요.
+ 
+이어서 가입자 조회와 분기 처리 부분을 보겠습니다.
+
+```typescript
+  const existing = await db
+    .select()
+    .from(subscribers)
+    .where(eq(subscribers.email, email));
+  const now = new Date();
+
+  if (existing.length > 0) {
+    const sub = existing[0];
+
+    if (sub.status === "confirmed") {
+      return genericResponse();
+    }
+
+    if (sub.status === "pending" && sub.confirmationTokenExpiresAt) {
+      const sentAt = new Date(
+        sub.confirmationTokenExpiresAt.getTime() - TOKEN_EXPIRY_MS,
+      );
+      const sinceSent = now.getTime() - sentAt.getTime();
+
+      if (sinceSent < RESEND_GRACE_MS) {
+        return genericResponse();
+      }
+
+      const { raw, hash } = generateToken();
+      await db
+        .update(subscribers)
+        .set({
+          confirmationTokenHash: hash,
+          confirmationTokenExpiresAt: new Date(now.getTime() + TOKEN_EXPIRY_MS),
+        })
+        .where(eq(subscribers.email, email));
+
+      await sendConfirmationEmail(email, raw);
+      return genericResponse();
+    }
+  }
+
+  const { raw, hash } = generateToken();
+  await db.insert(subscribers).values({
+    email,
+    confirmationTokenHash: hash,
+    confirmationTokenExpiresAt: new Date(now.getTime() + TOKEN_EXPIRY_MS),
+  });
+
+  await sendConfirmationEmail(email, raw);
+  return genericResponse();
+}
+```
+
+이미 가입 이력이 있는 이메일이 들어왔을 때는 상태에 따라 세 가지로 나눠서 처리합니다.
+ 
+- **이미 `confirmed` 상태 (가입 확정 완료)**: 아무 작업도 하지 않고 같은 응답만 돌려줍니다. 메일도 다시 보내지 않고요.
+- **`pending` 상태이고, 메일 보낸 지 아직 5분이 지나지 않은 경우**: 사용자가 새로고침을 두 번 누르는 상황을 막아주려는 거예요. 메일은 보내지 않고 같은 응답만 돌려줍니다.
+- **`pending` 상태이고 유예 시간(5분)이 지났을 때**: 토큰을 새로 발급하고 해당 가입자 정보를 업데이트한 뒤, 확인 메일을 다시 보내려고 합니다.
+
+기존 가입 이력이 없는 새로운 이메일이라면(`existing.length === 0`) 가입자 정보를 새로 추가하고 확인 메일을 보냅니다.
+
+## Step 4. Resend로 확인 메일 보내기
+
+`sendConfirmationEmail`은 위 핸들러 안에서 두 번 호출됐어요. 구현은 이렇게 했습니다.
+
+```typescript
+async function sendConfirmationEmail(email: string, rawToken: string) {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    console.error("RESEND_API_KEY not set");
+    return;
+  }
+
+  const url = `${SITE.url}/confirm/${rawToken}`;
+  const html = `<p>${SITE.name} 뉴스레터 가입을 확정해 주세요.</p>
+<p><a href="${url}">가입 확정하기</a></p>
+<p style="color:#888;font-size:13px">본인이 요청하지 않았다면 이 메일은 무시하셔도 됩니다.</p>`;
+  const text = `${SITE.name} 뉴스레터 가입을 확정해 주세요.
+
+${url}
+
+본인이 요청하지 않았다면 이 메일은 무시하셔도 됩니다.`;
+
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: FROM_ADDRESS,
+      to: [email],
+      subject: `${SITE.name} 뉴스레터 가입을 확정해 주세요`,
+      html,
+      text,
+    }),
+  });
+
+  if (!res.ok) {
+    console.error("Resend API error:", res.status, await res.text());
+  }
+}
+```
+
+`html`과 `text`를 **둘 다 같이** 보냅니다. HTML만 보내면 일부 메일 앱(특히 미리보기로 본문을 먼저 보여주는 앱)이나 스팸 필터가 "본문이 비어 있는 의심스러운 메일"로 판단하기 쉽거든요. 텍스트 대체본을 같이 보내면 메일 앱이 두 버전을 모두 갖춘 메일(multipart/alternative)로 인식해서, 도착률이 눈에 띄게 올라갑니다.
+ 
+`RESEND_API_KEY`는 도메인 셋업 단계에서 만든 API 키예요. 개발 환경과 배포 환경에서 다른 키를 쓰도록 분리해 뒀어요. 로컬 개발용은 `.env.local`에, 배포용은 Vercel의 Production/Preview 환경 변수에 따로 등록합니다. 이렇게 분리해두면 한쪽 키가 노출되더라도 다른 쪽 발송에는 영향이 없고, 로그도 환경별로 깔끔하게 나뉘거든요. 보내는 주소(From)는 양쪽 모두 같은 `hello@joyousgarage.com`을 씁니다.
+
+## Step 5. 구독 폼 구현하기
+
+이제 화면 쪽을 만들 차례예요. 그동안 비활성 상태였던 구독 폼이 실제로 동작하도록 만들려고 합니다. Next.js의 클라이언트 컴포넌트(브라우저에서 동작하는 컴포넌트)로 바꾸고, 대기(idle) / 전송 중(submitting) / 성공(success) / 오류(error) 네 가지 상태로 나눠서 다룰게요.
+
+```tsx
+// components/newsletter-cta.tsx
+"use client";
+
+import { useState } from "react";
+
+type State =
+  | { kind: "idle" }
+  | { kind: "submitting" }
+  | { kind: "success" }
+  | { kind: "error"; message: string };
+
+export function NewsletterCTA() {
+  const [email, setEmail] = useState("");
+  const [state, setState] = useState<State>({ kind: "idle" });
+
+  async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (state.kind === "submitting") return;
+
+    setState({ kind: "submitting" });
+    try {
+      const res = await fetch("/api/subscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      if (!res.ok) {
+        setState({ kind: "error", message: "잠시 후 다시 시도해 주세요." });
+        return;
+      }
+      setState({ kind: "success" });
+      setEmail("");
+    } catch {
+      setState({ kind: "error", message: "잠시 후 다시 시도해 주세요." });
+    }
+  }
+  // ... 렌더 부분 생략
+}
+```
+
+각 상태별 화면은 이렇게 만들었어요.
+ 
+![헤더 옆에 배치된 Builder's letter 구독 폼, 이메일 주소 입력칸과 구독하기 버튼, 그 아래 RSS 폴백 링크](/images/subscribe-form-and-api/01-cta-full.webp)
+ 
+대기 상태(idle)에는 이메일 입력칸과 구독하기 버튼만 보이고, 그 아래에 RSS로 새 글을 받아볼 수 있는 대체 링크를 작게 두려고요. 메일을 받기 싫거나, 메일이 잘 안 오는 상황에도 새 글을 따라갈 수 있도록 두는 거예요.
+ 
+![구독 폼에 이메일이 입력된 상태, 구독하기 버튼이 활성화되어 있음](/images/subscribe-form-and-api/02-form-input.webp)
+ 
+입력하는 동안에는 폼을 그대로 두고, 전송 중일 때는 버튼 글자를 "보내는 중..."으로 바꾸고 입력칸과 버튼을 모두 비활성화합니다. 사용자가 더블 클릭이나 빠른 연속 클릭으로 두 번 전송하는 일을 막아주려는 거예요.
+ 
+성공하면 폼 영역 전체를 짧은 안내 박스(callout)로 바꿉니다.
+ 
+![확인 메일을 보냈어요 안내 callout, 동그란 체크 아이콘과 두 줄짜리 문구로 구성](/images/subscribe-form-and-api/03-success-callout.webp)
+ 
+처음에는 폼 아래에 한 줄 글로 "확인 메일을 보냈어요"만 보여줬는데, 너무 밋밋해서 안내 박스로 바꿨어요. 동그란 체크 아이콘, 굵은 한 줄 메시지, 그 아래 작은 글씨로 "메일이 안 보이면 스팸함도 확인해 주세요"가 들어갑니다. 사용자가 실제로 가장 자주 마주칠 상태이니까, 이 부분만큼은 정성을 들였어요.
+ 
+오류 상태에서는 폼 아래쪽에 작은 빨간 글씨로 메시지를 보여주고, 사용자가 다시 시도할 수 있게 입력칸은 그대로 둡니다.
+
+## Step 6. 로컬에서 한 번, production에서 한 번
+
+로컬에서는 `curl`로 라우트가 동작하는지부터 확인했어요.
+
+```bash
+curl -X POST http://localhost:3000/api/subscribe \
+  -H "Content-Type: application/json" \
+  -d '{"email":"padawan.joy+test1@gmail.com"}'
+```
+
+응답은 앞에서 정한 대로 같은 메시지가 돌아옵니다.
+
+```json
+{"message":"확인 메일을 보냈어요. 받은편지함과 스팸함을 확인해 주세요."}
+```
+
+폼에서도 같은 방식으로 가입을 해보고, Resend 대시보드에서 발송 기록과 도착 완료(Delivered) 상태를 확인했어요. DB 쪽에서는 `confirmation_token_hash`에 64글자짜리 16진수 문자열이 들어가 있고 `confirmation_token_expires_at`이 24시간 뒤로 잡혀 있는지까지 봤습니다.
+ 
+배포 환경(production)에는 두 커밋으로 나눠 올렸어요. 하나는 스키마 변경 커밋이고, 다른 하나는 API 라우트와 폼 커밋입니다. Vercel 환경 변수에 production용 Resend API 키만 추가해주면 그대로 동작합니다.
+ 
+배포가 끝난 뒤 production 도메인에서 `padawan.joy+prod1@gmail.com`으로 다시 가입해봤어요. 받은편지함 목록에 메일이 도착했고요.
+ 
+![Gmail 받은편지함에 Padawan Joy 발신자로 'JoyousGarage 뉴스레터 가입을 확정해 주세요' 메일이 도착한 모습](/images/subscribe-form-and-api/04-gmail-inbox.webp)
+ 
+열어 보면 발신자, 제목, 본문, 가입 확정하기 링크가 모두 의도한 그대로입니다.
+ 
+![열어본 확인 메일 본문, 제목 'JoyousGarage 뉴스레터 가입을 확정해 주세요', 본문에 가입 확정하기 링크가 있는 모습](/images/subscribe-form-and-api/05-confirmation-mail.webp)
+ 
+다만 한 가지 짚고 갈 부분이 있어요. 도메인 셋업 글에서 SPF · DKIM · DMARC를 다 맞춰 두긴 했지만, **도메인 평판 자체는 시간이 쌓여야 만들어지는 부분**이라 신생 도메인은 첫 발송이 스팸함으로 떨어지는 경우가 자주 있습니다. 저도 첫 메일은 스팸함에서 발견했어요. 받은편지함으로 옮기는 한 번의 동작이 Gmail 쪽에 긍정적인 신호로 작용해서, 그 뒤로는 받은편지함에 안착하기 시작했습니다. 새 도메인이라면 이 단계를 한 번씩 다 거친다고 보시면 돼요. 실제 발송 운영과 워밍업 이야기는 이후 글에서 따로 다루겠습니다.
+
+## 마치며
+
+여기까지 작업하고 나니, 구독 폼이 동작하고, API 라우트가 토큰을 만들어 DB에 저장하고, 사용자 메일함에는 원본 토큰이 담긴 확인 메일이 도착하게 됐어요. 다만 이 링크를 지금 누르면 이렇게 보입니다.
+ 
+![가입 확정 링크를 눌렀을 때 표시되는 404 Page not found 화면](/images/subscribe-form-and-api/06-confirm-404.webp)
+ 
+가입 확정 페이지를 아직 안 만들어 뒀거든요. 다음 글에서는 이 부분을 채워볼게요. `/confirm/[token]` 라우트에서 원본 토큰을 받아 같은 해시 방식으로 검증하고, 만료를 확인하고, `subscribers.status`를 `confirmed`로 바꾸는 과정이에요. 이 단계까지 끝나야 진짜로 가입이 완료됩니다. 그 작업은 다음 글에서 이어가볼게요.
