@@ -643,6 +643,44 @@ main { max-width: 1180px; margin: 0 auto; padding: 0 var(--s-6) var(--s-10); }
 }
 .cta-rss-link:hover { opacity: 1; }
 
+/* Confirm page */
+.confirm-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  align-items: center;
+  margin-top: var(--s-6);
+}
+.confirm-form button {
+  padding: var(--s-3) var(--s-6);
+  border: none;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--neu-raised);
+  transition: transform .15s var(--ease), box-shadow .15s var(--ease);
+}
+.confirm-form button:hover { transform: translateY(-1px); }
+.confirm-form button:active { transform: translateY(0); box-shadow: var(--neu-pressed); }
+.confirm-form button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+.confirm-success {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-3) var(--s-5);
+  background: var(--base);
+  border-radius: 18px;
+  box-shadow: var(--neu-pressed);
+  margin: var(--s-6) auto 0;
+}
+
 /* Footer */
 footer {
   margin-top: var(--s-10);
