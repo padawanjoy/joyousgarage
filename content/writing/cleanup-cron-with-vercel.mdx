@@ -1,0 +1,145 @@
+---
+title: "Vercel Cron으로 만료된 row 자동 정리하기"
+date: "2026-06-15"
+category: "Tutorial"
+description: "만료된 가입 대기자와 오래된 rate limit row를 매일 자동으로 정리하기"
+tags: ["newsletter", "nextjs", "vercel-cron", "postgres"]
+series: "newsletter"
+seriesOrder: 8
+---
+
+지난 글까지 해서 이중 옵트인 전체 과정이 마무리됐어요. 가입 폼에서 이메일을 받고, 확인 메일을 보내고, 링크의 버튼을 눌러야 가입이 확정되는 그런 과정이죠 (상태값은 `confirmed`). 그런데 이 과정을 돌리다 보면, DB에 쓸모없어진 row가 조용히 쌓이게 됩니다. 이번 글에서는 그걸 매일 한 번 정리하는 cron을 만들어보겠습니다.
+
+## Step 1. 어떤 row가 쌓이나
+
+이렇게 쌓이는 row는 크게 두 가지예요.
+
+하나는 **확인 메일을 누르지 않은 사람**입니다. 가입 폼에 이메일을 적고 신청은 했지만, 24시간 안에 확인 메일의 버튼을 누르지 않으면, 그 row는 `status='pending'`인 채로 영영 남아요. 토큰은 만료됐고, 다시 가입하면 어차피 새 row가 생기니, 만료된 pending은 더 들고 있을 이유가 없습니다.
+
+다른 하나는 **오래된 rate limit row**예요. 지난 구독 라우트에서 만든 레이트 리밋은 `key`마다 row를 하나 만들어서, 정해진 시간(1시간) 동안 몇 번 요청이 왔는지를 셉니다. 같은 key로 다시 요청이 오면 그 row를 재사용하지만, 한 번 쓰고 다시 안 오는 IP나 이메일은 1시간이 지난 뒤에도 row가 그대로 남아요. 기능상 문제는 없지만, 시간이 지나면 의미 없는 row가 계속 늘어납니다.
+
+둘 다 지금 당장 문제를 일으키지는 않아요. 다만 그냥 두면 안 쓰는 데이터가 테이블에 천천히 계속 늘어납니다. 그래서 하루에 한 번 정리하기로 했어요.
+
+## Step 2. cron이 호출할 주소와 자물쇠 걸기
+
+Vercel Cron은 정해진 시각에 우리 프로젝트의 특정 주소를 대신 호출해주는 기능입니다. 이 기능을 사용하면 주기적인 정리 작업을 위한 특별한 처리를 할 필요없이, 라우트 하나만 만들면 되는거죠. `GET /api/cron/cleanup`을 만들고, Vercel이 매일 이 주소를 부르게 하겠습니다.
+
+그런데 이 주소는 외부에 공개돼 있습니다. cron만 부르는 게 아니라, 주소를 아는 사람은 누구나 호출할 수 있다는 뜻이죠. 정리 로직이 `DELETE`를 실행하는데, 아무나 부를 수 있게 두면 안 되겠죠. 그래서 앞에 자물쇠를 하나 걸어둡니다.
+
+```typescript
+// app/api/cron/cleanup/route.ts
+import { and, eq, lt } from "drizzle-orm";
+import { NextRequest, NextResponse } from "next/server";
+import { db } from "@/lib/db";
+import { rateLimit, subscribers } from "@/lib/db/schema";
+
+export async function GET(req: NextRequest) {
+  if (req.headers.get("authorization") !== `Bearer ${process.env.CRON_SECRET}`) {
+    return NextResponse.json({ ok: false }, { status: 401 });
+  }
+  // ... 정리 로직
+}
+```
+
+`CRON_SECRET`은 직접 정한 임의의 긴 문자열입니다. 환경 변수에 이 값을 넣어두면, **Vercel Cron이 우리 주소를 부를 때 `Authorization: Bearer <CRON_SECRET>` 헤더를 자동으로 붙여서 호출**합니다. 그래서 라우트는 이 헤더가 일치할 때만 통과시키고, 아니면 바로 401을 리턴해서 막습니다. `CRON_SECRET`을 모르는 외부 요청은 정리 로직까지 가지도 못하는 거죠. 로컬에서는 `.env.local`에, production에서는 Vercel 환경 변수에 따로 등록해 뒀습니다. 저는 임의의 긴 문자열을 `openssl rand -hex 32`로 만들어서 사용했습니다.
+
+## Step 3. 정리 쿼리
+
+자물쇠를 통과하면 실제 정리 작업 단계입니다. 가입자 정보가 담긴 `subscribers`와 레이트 리밋 기록인 `rate_limit`, 이 두 테이블을 각각 `DELETE` 한 번으로 정리합니다.
+
+```typescript
+const RATE_LIMIT_KEEP_MS = 24 * 60 * 60 * 1000;
+
+const now = new Date();
+
+const deletedPending = await db
+  .delete(subscribers)
+  .where(
+    and(
+      eq(subscribers.status, "pending"),
+      lt(subscribers.confirmationTokenExpiresAt, now),
+    ),
+  )
+  .returning({ id: subscribers.id });
+
+const rateCutoff = new Date(now.getTime() - RATE_LIMIT_KEEP_MS);
+const deletedRate = await db
+  .delete(rateLimit)
+  .where(lt(rateLimit.windowStartedAt, rateCutoff))
+  .returning({ key: rateLimit.key });
+```
+
+확인 메일을 누르지 않은 사람 구분은 간단합니다. `status`가 `pending`이고, 토큰 만료 시각이 지금보다 과거인 row로 구분할 수 있죠. 가입을 확정한(`confirmed`) 사람은 `status` 조건에서 걸러지니 정리 과정에서 절대 지워지지 않습니다.
+
+rate limit은 조금 더 고려할게 있는데요. 시리즈 글 5편에서 만든 레이트 리밋은 key마다 row를 하나 만들어, 1시간 구간(윈도우) 안에서 그 key가 몇 번 요청했는지를 카운트하도록 했었죠. 횟수를 세는 기준 시간은 1시간인데, 정리 기준은 **하루**로 더 길게 잡았습니다. 이건 정리하는 그 순간에 마침 막 만들어진 row를 실수로 지우는 일을 피하기 위해서 입니다. 지난 글에서 확정 처리할 때 나온 race condition과 같은 맥락이죠. 하루를 기준으로 두면 지금 쓰이고 있는 row는 절대 건드리지 않으면서, 만들어진 지 충분히 오래된 것만 지울 수 있으니까요.
+
+각 `DELETE`에 `returning`을 붙여서 몇 개를 지웠는지 받아 두고, 응답과 로그로 남깁니다.
+
+```typescript
+console.log(
+  `[/api/cron/cleanup] pending=${deletedPending.length} rate_limit=${deletedRate.length}`,
+);
+
+return NextResponse.json({
+  ok: true,
+  deleted: {
+    pending: deletedPending.length,
+    rateLimit: deletedRate.length,
+  },
+});
+```
+
+cron 작업은 사람이 보지 않는 시간에 돌아가니까, "오늘 몇 개를 지웠다"는 기록을 로그에 남겨 두면 나중에 확인할 때 편합니다.
+
+## Step 4. Vercel Cron 등록과 테스트
+
+이제 /api/cron/cleanup를 언제 호출할 건지를 Vercel에 알려줄 차례입니다. 프로젝트 루트에 `vercel.json` 파일을 아래와 같이 설정해서 두면 됩니다.
+
+```json
+{
+  "crons": [
+    {
+      "path": "/api/cron/cleanup",
+      "schedule": "0 18 * * *"
+    }
+  ]
+}
+```
+
+`schedule`은 cron에서 시각을 표현하는 표준 형식이고, **시각은 UTC(세계 표준시) 기준**입니다. `0 18 * * *`은 매일 UTC 18시, 한국 시간으로는 새벽 3시예요. 트래픽이 가장 적은 시간대를 골랐습니다.
+
+production에 배포하면 Vercel이 `vercel.json`을 읽어 cron을 자동으로 등록합니다. Settings > Cron Jobs 메뉴에서 등록된 스케줄을 확인할 수 있어요.
+
+![Vercel 대시보드 Cron Jobs 탭. /api/cron/cleanup이 '0 18 * * *' (At 06:00 PM UTC) 스케줄로 등록되어 있고 Enabled 상태](/images/cleanup-cron-with-vercel/01-vercel-cron-jobs.webp)
+
+배포 전에 로컬에서 먼저 돌려봤습니다. 인증을 통과하지 못한 요청이 제대로 막히는지부터 확인합니다.
+
+```bash
+# 인증 없이 호출 → 막힘
+curl -i http://localhost:3000/api/cron/cleanup
+# HTTP/1.1 401 Unauthorized
+# {"ok":false}
+
+# 올바른 시크릿 → 통과
+curl -i http://localhost:3000/api/cron/cleanup \
+  -H "Authorization: Bearer <CRON_SECRET>"
+# HTTP/1.1 200 OK
+# {"ok":true,"deleted":{"pending":1,"rateLimit":13}}
+```
+
+만료된 가입 신청자 1명과, 그동안 가입·확정을 테스트하며 쌓인 오래된 rate limit row 13개가 한 번에 정리됐습니다. 이 13개라는 숫자가 cron이 필요한 이유를 그대로 보여줍니다. 하나하나 수동으로 정리한 적이 없으니, 시간이 지나는 만큼 그대로 쌓여 있던 거죠.
+
+정리 전후로 남은 row를 비교하면 이렇습니다.
+
+```text
+정리 전  subscribers 2개   rate_limit 14개
+정리 후  subscribers 1개   rate_limit  1개   (confirmed 구독자, 지금 쓰이는 row만 남음)
+```
+
+`confirmed` 구독자와 방금 만들어진 rate limit row는 그대로 남고, 나머지만 사라졌습니다. production에서도 같은 방식으로 한 번 호출해 401과 200을 확인했어요. 같은 DB라 지울 건 이미 없었지만, 인증과 라우트가 배포 환경에서도 제대로 동작하는지 확인 차원에서 돌려봤습니다.
+
+## 마치며
+
+이제 가입부터 확정, 그리고 뒷정리까지 자동으로 돌아가게 됐습니다. DB를 수동으로 정리하지 않아도, 매일 새벽 한 번씩 만료된 가입 신청과 오래된 rate limit row가 정리됩니다. 구독자 인프라 쪽은 이걸로 일단락됐네요.
+
+다음은 드디어 이 `confirmed` 구독자들에게 실제로 글을 보내는 부분을 살펴보겠습니다.
