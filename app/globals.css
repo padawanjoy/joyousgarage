@@ -436,6 +436,8 @@ main { max-width: 1180px; margin: 0 auto; padding: 0 var(--s-6) var(--s-10); }
   box-shadow: var(--neu-pressed);
   color: var(--accent-deep);
   font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .post-meta .sep { color: var(--mid); }
 .post-card h3 {
